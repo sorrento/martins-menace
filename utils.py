@@ -1,12 +1,20 @@
 import heapq
+import math
+import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
 import numpy as np
 from typing import List
 from itertools import zip_longest
+from shapely.ops import transform, unary_union
+from shapely.geometry import Polygon, MultiPoint, MultiPolygon
+from shapely import affinity
+from fastprogress import master_bar, progress_bar
+from operator import mul 
+from functools import reduce
+
 
 TARGET_WIDTH, TARGET_HEIGHT = 5.9, 4.95
-
 
 @dataclass
 class Piece:
@@ -18,10 +26,10 @@ class Piece:
     )
 
     def __init__(
-        self, name: str, id: int, ascii_pattern: List[str] = None, pattern=None
+            self, name: str, id_: int, ascii_pattern: List[str] = None, pattern=None
     ):
         self.name = name
-        self.id = id
+        self.id = id_
         if pattern is None:
             self.pattern = np.array(
                 [[(1 if c != " " else 0) for c in row]
@@ -52,6 +60,9 @@ class Piece:
         return list(sorted(set(versions)))
 
     def __lt__(self, other):
+        """
+        This is needed to avoid adding the same piece in different orientations
+        """
         for a, b in zip(self.pattern.ravel(), other.pattern.ravel()):
             if a < b:
                 return True
@@ -68,12 +79,28 @@ class Piece:
 
 # TODO cache rot, flip
 class Board:
-    def __init__(self, x=0, y=0, pattern=None):
+    def __init__(self, x=0, y=0, pattern=None, d_pieces=None):
+        piece_T = Piece("T", id_=1, ascii_pattern=["***", " * ", " * "])
+        piece_s = Piece("s", id_=2, ascii_pattern=[" **", " * ", "** "])
+        piece_r = Piece("r", id_=3, ascii_pattern=[" **", "** ", " * "])
+        piece_f = Piece("f", id_=4, ascii_pattern=["* ", "**", "* ", "* "])
+
+        # assert piece_T != piece_f
+        # assert piece_T.rot(180) == piece_T.flip()
+        # assert piece_f.rot(180) != piece_T.flip()
+
+        # assert len(piece_T.all_versions()) == 4
+
+        if d_pieces is None:
+            d_pieces = {piece.id: piece for piece in [piece_T, piece_s, piece_r, piece_f]}
+        
+        self.d_pieces = d_pieces
         self.x = x
         self.y = y
         self.pattern = (
             piece_T.pattern.copy() * piece_T.id if pattern is None else pattern
         )
+        # se multiplica por el id para que no se confundan las piezas al hacer un print normal
 
     def cost(self):
         all_pieces = []
@@ -99,24 +126,27 @@ class Board:
         # Ensure width is the larger dimension and height is the smaller
         width, height = max(width, height), min(width, height)
         cost = (
-            max(width - TARGET_WIDTH, 0) ** 2 +
-            max(height - TARGET_HEIGHT, 0) ** 2
-        ) ** 0.5
+                       max(width - TARGET_WIDTH, 0) ** 2 +
+                       max(height - TARGET_HEIGHT, 0) ** 2
+               ) ** 0.5
         return minimum_rotated_rectangle.area, (width, height), cost
 
     def blocks(self):
-        for id in np.unique(self.pattern):
+        """
+        Returns a generator of (shapely.geometry.Polygon, color) tuples
+        """
+        for id_ in np.unique(self.pattern):
             blocks = []
-            if id == 0:
+            if id_ == 0:
                 continue
             for i, row in enumerate(self.pattern):
                 for j, cell in enumerate(row):
-                    if cell == id:
+                    if cell == id_:
                         blocks.append(
                             Polygon(
                                 [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)])
                         )
-            yield (MultiPolygon(blocks), pieces_dict[id].color())
+            yield MultiPolygon(blocks), self.d_pieces[id_].color()
 
     def plot(self, ax):
         all_pieces = []
@@ -148,7 +178,7 @@ class Board:
         line += "\n" + "=" * (self.pattern.shape[1] + 2) + "\n"
         for row in self.pattern:
             line += "|" + \
-                "".join([str(cell) if cell else " " for cell in row]) + "|\n"
+                    "".join([str(cell) if cell else " " for cell in row]) + "|\n"
         line += "" + "=" * (self.pattern.shape[1] + 2) + "\n"
         return line
 
@@ -208,22 +238,22 @@ class Board:
                 )
             # print(f"{pattern=}")
             if np.any(
-                (
-                    pattern[
-                        x - b_x: x - b_x + piece.pattern.shape[0],
-                        y - b_y: y - b_y + piece.pattern.shape[1],
-                    ]
-                    != 0
-                )
-                & (piece.pattern != 0)
+                    (
+                            pattern[
+                            x - b_x: x - b_x + piece.pattern.shape[0],
+                            y - b_y: y - b_y + piece.pattern.shape[1],
+                            ]
+                            != 0
+                    )
+                    & (piece.pattern != 0)
             ):
                 x += 1  # correction
             else:
                 pattern[
-                    x - b_x: x - b_x + piece.pattern.shape[0],
-                    y - b_y: y - b_y + piece.pattern.shape[1],
+                x - b_x: x - b_x + piece.pattern.shape[0],
+                y - b_y: y - b_y + piece.pattern.shape[1],
                 ] += (
-                    piece.pattern * piece.id
+                        piece.pattern * piece.id
                 )
                 break
 
@@ -245,9 +275,9 @@ def search(current_boards, piece):
             [-4, -3, -2, -1, 0, 1, 2, 3, 4],
         ]
         for option in progress_bar(
-            itertools.product(*base_options),
-            parent=mb,
-            total=reduce(mul, (len(o) for o in base_options)),
+                itertools.product(*base_options),
+                parent=mb,
+                total=reduce(mul, (len(o) for o in base_options)),
         ):
             flip, rotate_degrees, x, y = option
             b = board.add(piece, flip=flip,
@@ -266,7 +296,6 @@ def search(current_boards, piece):
     return [b for _, _, _, b in level], best_cost, best_area
 
 
-
 def plot_level(level, title):
     import matplotlib.pyplot as plt
 
@@ -280,3 +309,5 @@ def plot_level(level, title):
         ax.set_yticks([])  # Remove y-axis ticks
     fig.suptitle(title, fontsize=14)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+piece_T = Piece("T", id_=1, ascii_pattern=["***", " * ", " * "])
